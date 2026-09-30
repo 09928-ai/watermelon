@@ -2,11 +2,8 @@
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <title>Fruit Slice — เกมฟันผลไม้</title>
-<link rel="stylesheet" href="css/style.css">
-
-<!-- PWA -->
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#22c55e">
 <link rel="icon" href="./icon-192.png">
@@ -14,39 +11,815 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Fruit Slice">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;overflow:hidden;background:#2e1a0a;color:#fff;
+    font-family:system-ui,-apple-system,"Noto Sans Thai",sans-serif;
+    user-select:none;-webkit-user-select:none;touch-action:none;overscroll-behavior:none}
+  #game-wrap{position:fixed;inset:0;
+    background:radial-gradient(ellipse at 50% 40%,#8a5a2b 0%,#5b3a1c 55%,#2e1a0a 100%)}
+  #game-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  #hud{position:absolute;top:0;left:0;right:0;z-index:5;pointer-events:none;
+    display:flex;justify-content:space-between;align-items:flex-start;gap:8px;
+    padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0;
+    font-size:clamp(16px,4.2vw,24px);font-weight:800;text-shadow:0 2px 4px rgba(0,0,0,.7)}
+  #best{font-size:.75em;opacity:.9;color:#ffe066}
+  #lives{white-space:nowrap}
+  #lives .life{margin-left:4px;transition:opacity .2s}
+  #sound-btn{position:absolute;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);z-index:6;
+    width:48px;height:48px;border-radius:50%;border:0;font-size:22px;
+    background:rgba(0,0,0,.45);color:#fff;cursor:pointer}
+  .overlay{position:absolute;inset:0;z-index:10;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:16px;text-align:center;padding:24px;
+    background:rgba(20,10,4,.72)}
+  .overlay.hidden{display:none}
+  .overlay h1{font-size:clamp(36px,10vw,64px);color:#ffe066;text-shadow:0 3px 0 #b45309}
+  .overlay p{font-size:clamp(16px,4vw,22px);max-width:26em;line-height:1.4}
+  .overlay button{font-size:22px;font-weight:800;padding:14px 36px;border:0;border-radius:999px;
+    background:linear-gradient(#34d399,#16a34a);color:#fff;box-shadow:0 4px 0 #166534;cursor:pointer}
+  .overlay button:active{transform:translateY(2px);box-shadow:0 2px 0 #166534}
+</style>
 </head>
 <body>
 <div id="game-wrap">
   <header id="hud">
-    <div id="score">คะแนน: <span id="score-value">0</span></div>
+    <div>
+      <div id="score">คะแนน: <span id="score-value">0</span></div>
+      <div id="best">สถิติ: <span id="best-value">0</span></div>
+    </div>
     <div id="lives">
       <span class="life">🍉</span><span class="life">🍉</span><span class="life">🍉</span>
     </div>
   </header>
 
   <canvas id="game-canvas"></canvas>
+  <button id="sound-btn" aria-label="เปิด/ปิดเสียง">🔊</button>
 
   <div id="start-screen" class="overlay">
     <h1>Fruit Slice</h1>
-    <p>ลากนิ้ว / เมาส์ ฟันผลไม้ให้ขาด อย่าโดนระเบิด!</p>
+    <p>ลากนิ้ว / เมาส์ ฟันผลไม้ให้ขาด อย่าโดนระเบิด!<br>ทำคะแนนให้สูงกว่าสถิติเดิมเพื่อฉลอง 🎆</p>
     <button id="start-btn">เริ่มเกม</button>
   </div>
 
   <div id="gameover-screen" class="overlay hidden">
     <h1>จบเกม</h1>
-    <p>คะแนนของคุณ: <span id="final-score">0</span></p>
+    <p>คะแนนของคุณ: <span id="final-score">0</span><br>สถิติสูงสุด: <span id="final-best">0</span></p>
     <button id="restart-btn">เล่นอีกครั้ง</button>
   </div>
 </div>
 
-<script src="js/sfx.js"></script>
-<script src="js/game.js"></script>
 <script>
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./sw.js");
+/* ล้าง service worker / แคชเก่า เพื่อให้ได้เวอร์ชันล่าสุดเสมอ */
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(function (rs) {
+    rs.forEach(function (r) { r.unregister(); });
+  });
+}
+if (window.caches) {
+  caches.keys().then(function (ks) { ks.forEach(function (k) { caches.delete(k); }); });
+}
+</script>
+
+<script>
+/* ==========================================================
+   SFX — เสียง + เพลง + ประกาย (สร้างเสียงด้วย Web Audio ไม่ต้องมีไฟล์เสียง)
+   ========================================================== */
+(function () {
+  'use strict';
+
+  var MUSIC_VOL = 0.18, SFX_VOL = 0.75, MASTER_VOL = 0.9;
+  var BPM = 132, STEP_DUR = 60 / BPM / 2;
+
+  var ctx = null, master, musicBus, sfxBus, noiseBuf;
+  var musicOn = false, muted = false;
+  var timer = null, nextTime = 0, step = 0;
+
+  function init() {
+    if (ctx) {
+      if (ctx.state === 'suspended') ctx.resume();
+      return;
+    }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    // iPhone: ให้เสียงดังแม้เปิดสวิตช์โหมดเงียบ (Safari 16.4+)
+    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+    ctx = new AC();
+    master = ctx.createGain();
+    master.gain.value = muted ? 0 : MASTER_VOL;
+    master.connect(ctx.destination);
+    musicBus = ctx.createGain();
+    musicBus.gain.value = MUSIC_VOL;
+    musicBus.connect(master);
+    sfxBus = ctx.createGain();
+    sfxBus.gain.value = SFX_VOL;
+    sfxBus.connect(master);
+
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+    var d = noiseBuf.getChannelData(0);
+    for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+    // ปลดล็อกเสียงบน iOS ด้วยเสียงเงียบสั้น ๆ
+    try {
+      var b = ctx.createBuffer(1, 1, 22050);
+      var s = ctx.createBufferSource();
+      s.buffer = b;
+      s.connect(ctx.destination);
+      s.start(0);
+    } catch (e) {}
+    if (ctx.state === 'suspended') ctx.resume();
+  }
+
+  function mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+
+  function tone(freq, t, dur, type, vol, dest) {
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(dest);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+
+  function sweep(f0, f1, t, dur, type, vol, dest) {
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(dest);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+
+  function noise(t, dur, ftype, f0, f1, vol, dest, q) {
+    var s = ctx.createBufferSource();
+    s.buffer = noiseBuf;
+    var f = ctx.createBiquadFilter();
+    f.type = ftype;
+    f.Q.value = q || 1;
+    f.frequency.setValueAtTime(f0, t);
+    if (f1 !== f0) f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(dest);
+    s.start(t, Math.random() * 1.0);
+    s.stop(t + dur + 0.05);
+  }
+
+  /* ---------- เสียงเอฟเฟกต์ ---------- */
+  function slice() {
+    if (!ctx) return;
+    var t = ctx.currentTime, v = 0.9 + Math.random() * 0.25;
+    noise(t, 0.14, 'bandpass', 4200 * v, 900 * v, 0.55, sfxBus, 1.2);   // วูช
+    noise(t + 0.03, 0.13, 'lowpass', 2600, 300, 0.65, sfxBus, 0.7);      // แฉะ
+    sweep(280 * v, 70, t + 0.02, 0.14, 'sine', 0.5, sfxBus);             // ตุบ
+  }
+
+  function bomb() {
+    if (!ctx) return;
+    var t = ctx.currentTime;
+    noise(t, 0.7, 'lowpass', 1400, 70, 1.0, sfxBus, 0.7);
+    sweep(130, 32, t, 0.6, 'sine', 0.9, sfxBus);
+  }
+
+  function gameOver() {
+    if (!ctx) return;
+    var t = ctx.currentTime + 0.05;
+    [392, 330, 262, 196].forEach(function (f, i) {
+      tone(f, t + i * 0.22, 0.5, 'triangle', 0.35, sfxBus);
     });
   }
+
+  function applause(dur) {
+    if (!ctx) return;
+    dur = dur || 3.4;
+    var t0 = ctx.currentTime + 0.02, n = Math.floor(dur * 90);
+    for (var i = 0; i < n; i++) {
+      var t = t0 + Math.random() * dur;
+      var fadeIn = Math.min(1, (t - t0) / 0.4);
+      var fadeOut = Math.min(1, (t0 + dur - t) / 1.3);
+      var env = Math.max(0.05, fadeIn * fadeOut);
+      var f = 1200 + Math.random() * 2600;
+      noise(t, 0.03 + Math.random() * 0.045, 'bandpass', f, f, 0.32 * env, sfxBus, 0.8);
+    }
+  }
+
+  function sparkleSound() {
+    if (!ctx) return;
+    var t0 = ctx.currentTime + 0.05;
+    var notes = [1046.5, 1318.5, 1568, 2093, 2637, 3136];
+    for (var i = 0; i < 16; i++) {
+      var f = notes[Math.floor(Math.random() * notes.length)];
+      var t = t0 + i * 0.075 + Math.random() * 0.03;
+      tone(f, t, 0.4, 'sine', 0.16, sfxBus);
+      tone(f * 2, t, 0.25, 'triangle', 0.05, sfxBus);
+    }
+  }
+
+  /* ---------- เพลงประกอบ (C – G – Am – F) ---------- */
+  var MELODY = [
+    [76, null, 72, 76, 79, null, 76, 72],
+    [74, null, 71, 74, 79, null, 74, 71],
+    [72, null, 69, 72, 76, null, 72, 69],
+    [72, null, 69, 72, 77, 76, 72, 69]
+  ];
+  var ROOTS = [48, 43, 45, 41];
+
+  function scheduleStep(i, t) {
+    var bar = Math.floor(i / 8) % 4, pos = i % 8;
+    var m = MELODY[bar][pos];
+    if (m) tone(mtof(m), t, STEP_DUR * 1.6, 'square', 0.13, musicBus);
+    if (pos % 2 === 0) {
+      var root = ROOTS[bar] + (pos % 4 === 2 ? 7 : 0);
+      tone(mtof(root), t, STEP_DUR * 1.8, 'triangle', 0.4, musicBus);
+    }
+    if (pos === 0 || pos === 4) sweep(150, 40, t, 0.12, 'sine', 0.55, musicBus);
+    if (pos % 2 === 1) noise(t, 0.04, 'highpass', 7000, 7000, 0.14, musicBus, 0.7);
+  }
+
+  function scheduler() {
+    while (nextTime < ctx.currentTime + 0.25) {
+      scheduleStep(step, nextTime);
+      nextTime += STEP_DUR;
+      step++;
+    }
+  }
+
+  function startMusic() {
+    if (!ctx || musicOn) return;
+    musicOn = true;
+    step = 0;
+    var now = ctx.currentTime;
+    musicBus.gain.cancelScheduledValues(now);
+    musicBus.gain.setValueAtTime(MUSIC_VOL, now);
+    nextTime = now + 0.05;
+    scheduler();
+    timer = setInterval(scheduler, 100);
+  }
+
+  function stopMusic() {
+    if (!ctx || !musicOn) return;
+    musicOn = false;
+    clearInterval(timer);
+    var now = ctx.currentTime;
+    musicBus.gain.cancelScheduledValues(now);
+    musicBus.gain.setTargetAtTime(0, now, 0.05);
+  }
+
+  function toggleMute() {
+    muted = !muted;
+    if (master) master.gain.value = muted ? 0 : MASTER_VOL;
+    return muted;
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!ctx) return;
+    if (document.hidden) ctx.suspend(); else ctx.resume();
+  });
+
+  /* ---------- เอฟเฟกต์ประกาย (canvas แยกซ้อนบนเกม) ---------- */
+  var fx = { cv: null, c: null, parts: [], raf: 0, last: 0 };
+
+  function fit() {
+    var d = window.devicePixelRatio || 1;
+    fx.cv.width = innerWidth * d;
+    fx.cv.height = innerHeight * d;
+    fx.c.setTransform(d, 0, 0, d, 0, 0);
+  }
+
+  function ensureCanvas() {
+    if (fx.cv) return;
+    var cv = document.createElement('canvas');
+    cv.style.cssText =
+      'position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:9999';
+    document.body.appendChild(cv);
+    fx.cv = cv;
+    fx.c = cv.getContext('2d');
+    window.addEventListener('resize', fit);
+    fit();
+  }
+
+  function drawStar(c, x, y, r, rot) {
+    c.beginPath();
+    for (var i = 0; i < 8; i++) {
+      var a = rot + (i * Math.PI) / 4, rr = i % 2 ? r * 0.35 : r;
+      c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+    }
+    c.closePath();
+    c.fill();
+  }
+
+  function loop(now) {
+    var dt = Math.min(0.05, (now - fx.last) / 1000);
+    fx.last = now;
+    var c = fx.c;
+    c.clearRect(0, 0, innerWidth, innerHeight);
+    c.globalCompositeOperation = 'lighter';
+    fx.parts = fx.parts.filter(function (p) {
+      p.age += dt;
+      if (p.age >= p.life) return false;
+      p.vy += p.g * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.rot += p.spin * dt;
+      var k = 1 - p.age / p.life;
+      var tw = 0.6 + 0.4 * Math.sin(p.age * 25 + p.rot * 3);
+      c.fillStyle = 'hsla(' + p.hue + ',100%,' + p.light + '%,' + (k * tw).toFixed(3) + ')';
+      drawStar(c, p.x, p.y, p.size * (0.4 + 0.6 * k), p.rot);
+      return true;
+    });
+    if (fx.parts.length) {
+      fx.raf = requestAnimationFrame(loop);
+    } else {
+      fx.raf = 0;
+      c.clearRect(0, 0, innerWidth, innerHeight);
+    }
+  }
+
+  function kick() {
+    if (!fx.raf) {
+      fx.last = performance.now();
+      fx.raf = requestAnimationFrame(loop);
+    }
+  }
+
+  function burst(x, y, n) {
+    ensureCanvas();
+    n = n || 36;
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2, sp = 80 + Math.random() * 320;
+      fx.parts.push({
+        x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 60, g: 260,
+        age: 0, life: 0.7 + Math.random() * 0.9, size: 4 + Math.random() * 9,
+        hue: Math.random() < 0.7 ? 38 + Math.random() * 20 : 0,
+        light: Math.random() < 0.7 ? 60 : 100,
+        rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 8
+      });
+    }
+    kick();
+  }
+
+  function rain(n) {
+    ensureCanvas();
+    for (var i = 0; i < n; i++) {
+      fx.parts.push({
+        x: Math.random() * innerWidth, y: -20 - Math.random() * 120,
+        vx: (Math.random() - 0.5) * 60, vy: 80 + Math.random() * 160, g: 60,
+        age: 0, life: 2 + Math.random() * 1.8, size: 3 + Math.random() * 8,
+        hue: 40 + Math.random() * 15, light: Math.random() < 0.5 ? 65 : 100,
+        rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 6
+      });
+    }
+    kick();
+  }
+
+  function banner(text) {
+    if (!document.getElementById('sfx-style')) {
+      var st = document.createElement('style');
+      st.id = 'sfx-style';
+      st.textContent =
+        '.sfx-banner{position:fixed;top:28%;left:50%;z-index:10000;pointer-events:none;' +
+        'font:800 clamp(32px,9vw,64px)/1.1 system-ui,sans-serif;color:#ffe066;text-align:center;' +
+        'text-shadow:0 0 18px #ff9f1c,0 3px 0 #b45309,0 0 40px rgba(255,200,50,.8);' +
+        'animation:sfxPop 3.2s ease-out forwards}' +
+        '@keyframes sfxPop{0%{opacity:0;transform:translate(-50%,-50%) scale(.3)}' +
+        '15%{opacity:1;transform:translate(-50%,-50%) scale(1.18)}' +
+        '25%{transform:translate(-50%,-50%) scale(1)}' +
+        '80%{opacity:1;transform:translate(-50%,-50%) scale(1)}' +
+        '100%{opacity:0;transform:translate(-50%,-70%) scale(1)}}';
+      document.head.appendChild(st);
+    }
+    var el = document.createElement('div');
+    el.className = 'sfx-banner';
+    el.textContent = text;
+    document.body.appendChild(el);
+    setTimeout(function () { el.remove(); }, 3300);
+  }
+
+  /* ---------- ฉลองทำลายสถิติ: ปรบมือ + เสียงวิบวับ + ประกาย + ป้าย ---------- */
+  function celebrate() {
+    applause(3.4);
+    sparkleSound();
+    banner('🏆 สถิติใหม่!');
+    for (var i = 0; i < 10; i++) {
+      setTimeout(function () {
+        burst(innerWidth * (0.15 + Math.random() * 0.7),
+              innerHeight * (0.15 + Math.random() * 0.45), 40);
+      }, i * 240);
+    }
+    rain(90);
+  }
+
+  /* ---------- สถิติสูงสุด (localStorage) ---------- */
+  var KEY = 'fruitSliceBest';
+  var Record = {
+    best: 0, startBest: 0, celebrated: false,
+    load: function () {
+      try { this.best = Number(localStorage.getItem(KEY)) || 0; } catch (e) { this.best = 0; }
+    },
+    reset: function () {
+      this.load();
+      this.startBest = this.best;
+      this.celebrated = false;
+    },
+    update: function (score) {
+      if (score > this.best) {
+        this.best = score;
+        try { localStorage.setItem(KEY, String(score)); } catch (e) {}
+        // ฉลองครั้งเดียวต่อรอบ และไม่ฉลองรอบแรกสุด (ยังไม่มีสถิติให้ทำลาย)
+        if (this.startBest > 0 && !this.celebrated) {
+          this.celebrated = true;
+          celebrate();
+        }
+      }
+    }
+  };
+  Record.load();
+
+  window.SFX = {
+    init: init, startMusic: startMusic, stopMusic: stopMusic, toggleMute: toggleMute,
+    slice: slice, bomb: bomb, gameOver: gameOver,
+    applause: applause, sparkleSound: sparkleSound, burst: burst, celebrate: celebrate
+  };
+  window.Record = Record;
+})();
+</script>
+
+<script>
+/* ==========================================================
+   GAME — Fruit Slice
+   ========================================================== */
+(function () {
+  'use strict';
+
+  var SFX = window.SFX;
+  var Record = window.Record;
+
+  var canvas = document.getElementById('game-canvas');
+  var ctx = canvas.getContext('2d');
+  var scoreEl = document.getElementById('score-value');
+  var bestEl = document.getElementById('best-value');
+  var lifeEls = document.querySelectorAll('#lives .life');
+  var startScreen = document.getElementById('start-screen');
+  var gameoverScreen = document.getElementById('gameover-screen');
+  var finalScoreEl = document.getElementById('final-score');
+  var finalBestEl = document.getElementById('final-best');
+  var startBtn = document.getElementById('start-btn');
+  var restartBtn = document.getElementById('restart-btn');
+  var soundBtn = document.getElementById('sound-btn');
+
+  var EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+  var FRUITS = [
+    { e: '🍉', c: '#ff3b5c' }, { e: '🍎', c: '#e11d2e' }, { e: '🍊', c: '#ff9f1c' },
+    { e: '🍋', c: '#ffe14d' }, { e: '🍇', c: '#8b3fd9' }, { e: '🍓', c: '#ff2d55' },
+    { e: '🍍', c: '#ffd23f' }, { e: '🥝', c: '#7ac943' }, { e: '🍑', c: '#ff9a8b' }
+  ];
+  var BOMB = { e: '💣', c: '#555555' };
+  var MAX_LIVES = 3;
+
+  var W = 0, H = 0, dpr = 1, G = 1000, R = 34;
+  var state = 'idle'; // idle | playing | ending
+  var score = 0, lives = MAX_LIVES;
+  var objs = [], pieces = [], parts = [], texts = [], trail = [];
+  var spawnTimer = 0, endTimer = 0, flash = 0;
+  var pointerDown = false, lastP = null, swipeHits = 0;
+  var lastT = 0;
+
+  function resize() {
+    var rect = canvas.getBoundingClientRect();
+    var w = rect.width, h = rect.height;
+    if (w < 50 || h < 50) { w = window.innerWidth; h = window.innerHeight; }
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = w; H = h;
+    G = H * 1.6;
+    R = Math.max(28, Math.min(W, H) * 0.085);
+  }
+  window.addEventListener('resize', resize);
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+  function updateHud() {
+    scoreEl.textContent = score;
+    bestEl.textContent = Math.max(Record.best, score);
+    lifeEls.forEach(function (el, i) {
+      var on = i < lives;
+      el.style.opacity = on ? '1' : '0.25';
+      el.style.filter = on ? 'none' : 'grayscale(1)';
+    });
+  }
+
+  function spawnOne() {
+    var isBomb = score >= 5 && Math.random() < Math.min(0.2, 0.08 + score * 0.002);
+    var t = isBomb ? BOMB : FRUITS[(Math.random() * FRUITS.length) | 0];
+    var r = R * (isBomb ? 0.95 : 0.9 + Math.random() * 0.25);
+    var x = W * (0.15 + Math.random() * 0.7);
+    var apexH = H * (0.55 + Math.random() * 0.3);
+    var vy = -Math.sqrt(2 * G * apexH);
+    var tApex = -vy / G;
+    var tx = W * (0.25 + Math.random() * 0.5);
+    var vx = ((tx - x) / tApex) * 0.8;
+    objs.push({
+      x: x, y: H + r, vx: vx, vy: vy, r: r,
+      rot: Math.random() * 6.28, vr: (Math.random() - 0.5) * 6,
+      bomb: isBomb, t: t
+    });
+  }
+
+  function spawnWave() {
+    var n = 1;
+    if (Math.random() < Math.min(0.65, 0.2 + score * 0.012)) n++;
+    if (score > 20 && Math.random() < 0.35) n++;
+    for (var i = 0; i < n; i++) spawnOne();
+    spawnTimer = Math.max(0.6, 1.3 - score * 0.012);
+  }
+
+  function segDist(px, py, a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+    var t = l2 ? ((px - a.x) * dx + (py - a.y) * dy) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+  }
+
+  function burstParticles(x, y, color, n, speed) {
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * 6.283, sp = (0.3 + Math.random()) * speed;
+      parts.push({
+        x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80,
+        g: G * 0.5, r: 3 + Math.random() * 5, c: color,
+        age: 0, life: 0.5 + Math.random() * 0.45
+      });
+    }
+  }
+
+  function sliceObj(o, a, b) {
+    var idx = objs.indexOf(o);
+    if (idx >= 0) objs.splice(idx, 1);
+
+    if (o.bomb) {
+      SFX.bomb();
+      flash = 1;
+      burstParticles(o.x, o.y, '#ff9f1c', 26, 420);
+      burstParticles(o.x, o.y, '#444444', 18, 300);
+      endGame(true);
+      return;
+    }
+
+    score++;
+    swipeHits++;
+    SFX.slice();                       // <<< เสียงปาดผลไม้
+
+    var ang = Math.atan2(b.y - a.y, b.x - a.x);
+    var cutA = ang - o.rot;
+    var nx = -Math.sin(ang), ny = Math.cos(ang);
+    [-1, 1].forEach(function (s) {
+      pieces.push({
+        x: o.x, y: o.y,
+        vx: o.vx + s * nx * 140, vy: o.vy + s * ny * 140 - 40,
+        rot: o.rot, vr: o.vr + s * 2,
+        r: o.r, e: o.t.e, cutA: cutA, side: s, age: 0
+      });
+    });
+    burstParticles(o.x, o.y, o.t.c, 14, 260);
+
+    Record.update(score);              // <<< ทำลายสถิติ -> ปรบมือ + ประกาย
+    updateHud();
+  }
+
+  function handleSwipe(a, b) {
+    if (state !== 'playing') return;
+    if ((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) < 4) return;
+    var list = objs.slice();
+    for (var i = 0; i < list.length; i++) {
+      if (state !== 'playing') break;
+      var o = list[i];
+      if (segDist(o.x, o.y, a, b) <= o.r * 1.05) sliceObj(o, a, b);
+    }
+  }
+
+  function pos(e) {
+    var r = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - r.left, y: e.clientY - r.top,
+      cx: e.clientX, cy: e.clientY, t: performance.now()
+    };
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    pointerDown = true;
+    lastP = pos(e);
+    swipeHits = 0;
+    trail = [lastP];
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  canvas.addEventListener('pointermove', function (e) {
+    if (!pointerDown) return;
+    var p = pos(e);
+    handleSwipe(lastP, p);
+    trail.push(p);
+    lastP = p;
+  });
+
+  function endSwipe() {
+    if (!pointerDown) return;
+    pointerDown = false;
+    if (swipeHits >= 3 && state === 'playing' && lastP) {
+      var bonus = swipeHits;
+      score += bonus;
+      texts.push({ x: lastP.x, y: lastP.y, text: 'COMBO x' + swipeHits + '  +' + bonus, age: 0 });
+      SFX.burst(lastP.cx, lastP.cy, 24);
+      Record.update(score);
+      updateHud();
+    }
+    swipeHits = 0;
+  }
+  canvas.addEventListener('pointerup', endSwipe);
+  canvas.addEventListener('pointercancel', endSwipe);
+
+  function startGame() {
+    SFX.init();                        // <<< ต้องเรียกตอนกดปุ่ม (ปลดล็อกเสียง)
+    SFX.startMusic();                  // <<< เพลงประกอบ
+    Record.reset();
+
+    resize();
+    score = 0;
+    lives = MAX_LIVES;
+    objs = []; pieces = []; parts = []; texts = []; trail = [];
+    flash = 0;
+    spawnTimer = 0.4;
+    startScreen.classList.add('hidden');
+    gameoverScreen.classList.add('hidden');
+    updateHud();
+    state = 'playing';
+  }
+
+  function endGame(byBomb) {
+    if (state !== 'playing') return;
+    state = 'ending';
+    endTimer = byBomb ? 0.9 : 0.35;
+    SFX.stopMusic();
+  }
+
+  function finishGame() {
+    state = 'idle';
+    finalScoreEl.textContent = score;
+    finalBestEl.textContent = Record.best;
+    gameoverScreen.classList.remove('hidden');
+    SFX.gameOver();
+  }
+
+  function missFruit() {
+    lives--;
+    updateHud();
+    if (lives <= 0) endGame(false);
+  }
+
+  startBtn.addEventListener('click', startGame);
+  restartBtn.addEventListener('click', startGame);
+
+  soundBtn.addEventListener('click', function () {
+    SFX.init();
+    var muted = SFX.toggleMute();
+    soundBtn.textContent = muted ? '🔇' : '🔊';
+    if (!muted) SFX.slice();           // เสียงทดสอบ
+  });
+
+  function update(dt) {
+    if (state === 'playing') {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) spawnWave();
+    }
+
+    objs = objs.filter(function (o) {
+      o.vy += G * dt; o.x += o.vx * dt; o.y += o.vy * dt; o.rot += o.vr * dt;
+      if (o.y - o.r > H && o.vy > 0) {
+        if (!o.bomb && state === 'playing') missFruit();
+        return false;
+      }
+      return true;
+    });
+
+    pieces = pieces.filter(function (p) {
+      p.age += dt; p.vy += G * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+      return p.y - p.r < H + p.r * 2 && p.age < 3;
+    });
+
+    parts = parts.filter(function (p) {
+      p.age += dt; p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+      return p.age < p.life;
+    });
+
+    texts = texts.filter(function (t) {
+      t.age += dt; t.y -= 40 * dt;
+      return t.age < 0.9;
+    });
+
+    if (flash > 0) flash = Math.max(0, flash - dt * 2);
+
+    if (state === 'ending') {
+      endTimer -= dt;
+      if (endTimer <= 0) finishGame();
+    }
+  }
+
+  function drawEmoji(em, x, y, r, rot) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.font = Math.round(r * 1.9) + 'px ' + EMOJI_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(em, 0, 0);
+    ctx.restore();
+  }
+
+  function drawPiece(p) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot + p.cutA);
+    ctx.beginPath();
+    ctx.rect(-p.r * 2, p.side < 0 ? -p.r * 2 : 0, p.r * 4, p.r * 2);
+    ctx.clip();
+    ctx.rotate(-p.cutA);
+    ctx.font = Math.round(p.r * 1.9) + 'px ' + EMOJI_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(p.e, 0, 0);
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    var i;
+
+    for (i = 0; i < parts.length; i++) {
+      var q = parts[i];
+      ctx.globalAlpha = Math.max(0, 1 - q.age / q.life);
+      ctx.fillStyle = q.c;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, q.r, 0, 6.283);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (i = 0; i < objs.length; i++) drawEmoji(objs[i].t.e, objs[i].x, objs[i].y, objs[i].r, objs[i].rot);
+    for (i = 0; i < pieces.length; i++) drawPiece(pieces[i]);
+
+    var now = performance.now();
+    trail = trail.filter(function (p) { return now - p.t < 180; });
+    if (trail.length > 1) {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (i = 1; i < trail.length; i++) {
+        var a = trail[i - 1], b = trail[i];
+        var k = 1 - (now - b.t) / 180;
+        ctx.strokeStyle = 'rgba(255,255,255,' + k.toFixed(2) + ')';
+        ctx.lineWidth = 2 + 8 * k;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+    }
+
+    for (i = 0; i < texts.length; i++) {
+      var t = texts[i];
+      ctx.globalAlpha = Math.max(0, 1 - t.age / 0.9);
+      ctx.font = '800 ' + Math.round(R * 0.6) + 'px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#7c2d12';
+      ctx.strokeText(t.text, t.x, t.y);
+      ctx.fillStyle = '#ffe066';
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+
+    if (flash > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (flash * 0.8).toFixed(2) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  function frame(t) {
+    if (!lastT) lastT = t;
+    var dt = Math.min(0.033, (t - lastT) / 1000);
+    lastT = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  updateHud();
+  requestAnimationFrame(frame);
+})();
 </script>
 </body>
 </html>
