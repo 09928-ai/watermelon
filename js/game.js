@@ -1,248 +1,396 @@
-// ---------- Setup ----------
-const canvas = document.getElementById('game-canvas');
-const ctx = canvas.getContext('2d');
-const scoreEl = document.getElementById('score-value');
-const livesEls = document.querySelectorAll('#lives .life');
-const startScreen = document.getElementById('start-screen');
-const gameoverScreen = document.getElementById('gameover-screen');
-const finalScoreEl = document.getElementById('final-score');
+/* game.js — Fruit Slice (มีเสียงปาด + เพลงประกอบ + ฉลองทำลายสถิติ)
+   ต้องโหลด js/sfx.js ก่อนไฟล์นี้ */
+(() => {
+  'use strict';
 
-function resize() {
-  canvas.width = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
-}
-window.addEventListener('resize', resize);
+  // ถ้า sfx.js โหลดไม่สำเร็จ เกมยังเล่นได้ (แค่ไม่มีเสียง)
+  const noop = () => {};
+  const SFX = window.SFX || {
+    init: noop, startMusic: noop, stopMusic: noop,
+    slice: noop, bomb: noop, gameOver: noop, burst: noop
+  };
+  const Record = window.Record || { reset: noop, update: noop, best: 0 };
 
-const FRUIT_TYPES = [
-  { emoji: '🍉', r: 45 },
-  { emoji: '🍊', r: 34 },
-  { emoji: '🍋', r: 30 },
-  { emoji: '🍎', r: 34 },
-  { emoji: '🥝', r: 30 },
-  { emoji: '🍍', r: 40 },
-];
-const BOMB = { emoji: '💣', r: 36 };
-const GRAVITY = 0.32;
+  /* ---------- อ้างอิง element ---------- */
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score-value');
+  const lifeEls = document.querySelectorAll('#lives .life');
+  const startScreen = document.getElementById('start-screen');
+  const gameoverScreen = document.getElementById('gameover-screen');
+  const finalScoreEl = document.getElementById('final-score');
+  const startBtn = document.getElementById('start-btn');
+  const restartBtn = document.getElementById('restart-btn');
 
-let objects = [];      // flying fruits / bombs
-let particles = [];    // slice splatter particles
-let trail = [];        // pointer trail points
-let score = 0;
-let lives = 3;
-let running = false;
-let spawnTimer = 0;
-let spawnInterval = 70;
-let lastTime = 0;
+  /* ---------- ค่าคงที่ ---------- */
+  const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+  const FRUITS = [
+    { e: '🍉', c: '#ff3b5c' }, { e: '🍎', c: '#e11d2e' }, { e: '🍊', c: '#ff9f1c' },
+    { e: '🍋', c: '#ffe14d' }, { e: '🍇', c: '#8b3fd9' }, { e: '🍓', c: '#ff2d55' },
+    { e: '🍍', c: '#ffd23f' }, { e: '🥝', c: '#7ac943' }, { e: '🍑', c: '#ff9a8b' }
+  ];
+  const BOMB = { e: '💣', c: '#555555' };
+  const MAX_LIVES = 3;
 
-function reset() {
-  objects = [];
-  particles = [];
-  trail = [];
-  score = 0;
-  lives = 3;
-  spawnTimer = 0;
-  spawnInterval = 70;
-  scoreEl.textContent = '0';
-  livesEls.forEach(l => l.classList.remove('lost'));
-}
+  /* ---------- สถานะเกม ---------- */
+  let W = 0, H = 0, dpr = 1, G = 1000, R = 34;
+  let state = 'idle'; // idle | playing | ending
+  let score = 0, lives = MAX_LIVES;
+  let objs = [], pieces = [], parts = [], texts = [], trail = [];
+  let spawnTimer = 0, endTimer = 0, flash = 0;
+  let pointerDown = false, lastP = null, swipeHits = 0;
+  let lastT = 0;
 
-// ---------- Spawning ----------
-function spawnObject() {
-  const isBomb = Math.random() < 0.12;
-  const type = isBomb ? BOMB : FRUIT_TYPES[Math.floor(Math.random() * FRUIT_TYPES.length)];
-  const x = 60 + Math.random() * (canvas.width - 120);
-  const vx = (Math.random() - 0.5) * 6;
-  const vy = -(14 + Math.random() * 4) - (canvas.height < 500 ? 2 : 0);
-  objects.push({
-    type, x, y: canvas.height + 50, vx, vy,
-    r: type.r, rot: 0, vr: (Math.random() - 0.5) * 0.15,
-    sliced: false, isBomb, id: Math.random(),
-  });
-}
-
-// ---------- Input / slicing ----------
-function getPos(e) {
-  const rect = canvas.getBoundingClientRect();
-  const t = e.touches ? e.touches[0] : e;
-  return { x: t.clientX - rect.left, y: t.clientY - rect.top };
-}
-
-let pointerDown = false;
-function onDown(e) { pointerDown = true; trail = [getPos(e)]; }
-function onMove(e) {
-  if (!pointerDown || !running) return;
-  const p = getPos(e);
-  trail.push(p);
-  if (trail.length > 14) trail.shift();
-  checkSlices(p, trail[trail.length - 2]);
-}
-function onUp() { pointerDown = false; trail = []; }
-
-canvas.addEventListener('mousedown', onDown);
-canvas.addEventListener('mousemove', onMove);
-window.addEventListener('mouseup', onUp);
-canvas.addEventListener('touchstart', e => { onDown(e); e.preventDefault(); }, { passive: false });
-canvas.addEventListener('touchmove', e => { onMove(e); e.preventDefault(); }, { passive: false });
-canvas.addEventListener('touchend', onUp);
-
-function checkSlices(p1, p0) {
-  if (!p0) return;
-  for (const obj of objects) {
-    if (obj.sliced) continue;
-    const d = distToSegment(obj.x, obj.y, p0.x, p0.y, p1.x, p1.y);
-    if (d < obj.r) sliceObject(obj);
+  /* ---------- ขนาด canvas ---------- */
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    let w = rect.width, h = rect.height;
+    if (w < 50 || h < 50) { // กรณี CSS ไม่ได้กำหนดขนาด canvas
+      w = window.innerWidth;
+      h = window.innerHeight;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+    }
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    W = w;
+    H = h;
+    G = H * 1.6;                                   // แรงโน้มถ่วง
+    R = Math.max(28, Math.min(W, H) * 0.085);      // รัศมีผลไม้
   }
-}
+  window.addEventListener('resize', resize);
+  canvas.style.touchAction = 'none';
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-function distToSegment(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1, dy = y2 - y1;
-  const len2 = dx * dx + dy * dy;
-  let t = len2 === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  const cx = x1 + t * dx, cy = y1 + t * dy;
-  return Math.hypot(px - cx, py - cy);
-}
-
-function sliceObject(obj) {
-  obj.sliced = true;
-  if (obj.isBomb) {
-    loseLife(true);
-    spawnParticles(obj.x, obj.y, '#333', 18);
-  } else {
-    score += 10;
+  /* ---------- HUD ---------- */
+  function updateHud() {
     scoreEl.textContent = score;
-    spawnParticles(obj.x, obj.y, '#c1272d', 14);
-    // two halves fly apart
-    for (const dir of [-1, 1]) {
-      objects.push({
-        type: obj.type, x: obj.x, y: obj.y, vx: obj.vx + dir * 3, vy: obj.vy - 2,
-        r: obj.r * 0.8, rot: obj.rot, vr: dir * 0.25, sliced: true, half: dir,
-        isBomb: false, fading: 1, id: Math.random(),
+    lifeEls.forEach((el, i) => {
+      const on = i < lives;
+      el.style.opacity = on ? '1' : '0.25';
+      el.style.filter = on ? 'none' : 'grayscale(1)';
+    });
+  }
+
+  /* ---------- สร้างผลไม้/ระเบิด ---------- */
+  function spawnOne() {
+    const isBomb = score >= 5 && Math.random() < Math.min(0.2, 0.08 + score * 0.002);
+    const t = isBomb ? BOMB : FRUITS[(Math.random() * FRUITS.length) | 0];
+    const r = R * (isBomb ? 0.95 : 0.9 + Math.random() * 0.25);
+    const x = W * (0.15 + Math.random() * 0.7);
+    const apexH = H * (0.55 + Math.random() * 0.3);
+    const vy = -Math.sqrt(2 * G * apexH);
+    const tApex = -vy / G;
+    const tx = W * (0.25 + Math.random() * 0.5);
+    const vx = ((tx - x) / tApex) * 0.8;
+    objs.push({
+      x, y: H + r, vx, vy, r,
+      rot: Math.random() * 6.28, vr: (Math.random() - 0.5) * 6,
+      bomb: isBomb, t
+    });
+  }
+
+  function spawnWave() {
+    let n = 1;
+    if (Math.random() < Math.min(0.65, 0.2 + score * 0.012)) n++;
+    if (score > 20 && Math.random() < 0.35) n++;
+    for (let i = 0; i < n; i++) spawnOne();
+    spawnTimer = Math.max(0.6, 1.3 - score * 0.012);
+  }
+
+  /* ---------- ฟัน ---------- */
+  function segDist(px, py, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 ? ((px - a.x) * dx + (py - a.y) * dy) / l2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+  }
+
+  function burstParticles(x, y, color, n, speed) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * 6.283;
+      const sp = (0.3 + Math.random()) * speed;
+      parts.push({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80,
+        g: G * 0.5, r: 3 + Math.random() * 5, c: color,
+        age: 0, life: 0.5 + Math.random() * 0.45
       });
     }
   }
-}
 
-function spawnParticles(x, y, color, n) {
-  for (let i = 0; i < n; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const speed = 2 + Math.random() * 5;
-    particles.push({
-      x, y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
-      life: 30 + Math.random() * 15, color, size: 2 + Math.random() * 3,
-    });
-  }
-}
+  function sliceObj(o, a, b) {
+    const idx = objs.indexOf(o);
+    if (idx >= 0) objs.splice(idx, 1);
 
-function loseLife(fromBomb) {
-  lives--;
-  const idx = 3 - lives - 1;
-  if (idx >= 0 && idx < livesEls.length) livesEls[idx].classList.add('lost');
-  if (lives <= 0) endGame();
-}
-
-// ---------- Game loop ----------
-function update(dt) {
-  spawnTimer++;
-  if (spawnTimer >= spawnInterval) {
-    spawnTimer = 0;
-    spawnObject();
-    if (spawnInterval > 32) spawnInterval -= 0.6;
-  }
-
-  for (const obj of objects) {
-    obj.vy += GRAVITY;
-    obj.x += obj.vx;
-    obj.y += obj.vy;
-    obj.rot += obj.vr;
-    if (obj.fading !== undefined) obj.fading -= 0.02;
-  }
-
-  // remove offscreen / lost fruit
-  objects = objects.filter(obj => {
-    if (obj.y - obj.r > canvas.height + 80) {
-      if (!obj.sliced && !obj.isBomb) loseLife(false);
-      return false;
+    if (o.bomb) {
+      SFX.bomb();
+      flash = 1;
+      burstParticles(o.x, o.y, '#ff9f1c', 26, 420);
+      burstParticles(o.x, o.y, '#444444', 18, 300);
+      endGame(true);
+      return;
     }
-    if (obj.fading !== undefined && obj.fading <= 0) return false;
-    return true;
+
+    score++;
+    swipeHits++;
+    SFX.slice();
+
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    const cutA = ang - o.rot;
+    const nx = -Math.sin(ang), ny = Math.cos(ang);
+    [-1, 1].forEach((s) => {
+      pieces.push({
+        x: o.x, y: o.y,
+        vx: o.vx + s * nx * 140, vy: o.vy + s * ny * 140 - 40,
+        rot: o.rot, vr: o.vr + s * 2,
+        r: o.r, e: o.t.e, cutA, side: s, age: 0
+      });
+    });
+    burstParticles(o.x, o.y, o.t.c, 14, 260);
+
+    updateHud();
+    Record.update(score); // ทำลายสถิติ -> ปรบมือ + ประกาย
+  }
+
+  function handleSwipe(a, b) {
+    if (state !== 'playing') return;
+    if ((b.x - a.x) ** 2 + (b.y - a.y) ** 2 < 4) return;
+    for (const o of objs.slice()) {
+      if (state !== 'playing') break;
+      if (segDist(o.x, o.y, a, b) <= o.r * 1.05) sliceObj(o, a, b);
+    }
+  }
+
+  /* ---------- Pointer (เมาส์ + นิ้ว) ---------- */
+  function pos(e) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - r.left, y: e.clientY - r.top,
+      cx: e.clientX, cy: e.clientY, t: performance.now()
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    pointerDown = true;
+    lastP = pos(e);
+    swipeHits = 0;
+    trail = [lastP];
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
   });
 
-  for (const p of particles) {
-    p.vy += GRAVITY * 0.5;
-    p.x += p.vx;
-    p.y += p.vy;
-    p.life--;
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointerDown) return;
+    const p = pos(e);
+    handleSwipe(lastP, p);
+    trail.push(p);
+    lastP = p;
+  });
+
+  function endSwipe() {
+    if (!pointerDown) return;
+    pointerDown = false;
+    // ฟันต่อเนื่อง 3 ชิ้นขึ้นไปในการลากครั้งเดียว = โบนัสคอมโบ
+    if (swipeHits >= 3 && state === 'playing' && lastP) {
+      const bonus = swipeHits;
+      score += bonus;
+      texts.push({ x: lastP.x, y: lastP.y, text: 'COMBO x' + swipeHits + '  +' + bonus, age: 0 });
+      if (SFX.burst) SFX.burst(lastP.cx, lastP.cy, 24);
+      updateHud();
+      Record.update(score);
+    }
+    swipeHits = 0;
   }
-  particles = particles.filter(p => p.life > 0);
-}
+  canvas.addEventListener('pointerup', endSwipe);
+  canvas.addEventListener('pointercancel', endSwipe);
 
-function draw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  /* ---------- เริ่ม / จบเกม ---------- */
+  function startGame() {
+    resize();
+    score = 0;
+    lives = MAX_LIVES;
+    objs = []; pieces = []; parts = []; texts = []; trail = [];
+    flash = 0;
+    spawnTimer = 0.4;
+    startScreen.classList.add('hidden');
+    gameoverScreen.classList.add('hidden');
+    updateHud();
 
-  // trail
-  if (trail.length > 1) {
-    ctx.beginPath();
-    ctx.moveTo(trail[0].x, trail[0].y);
-    for (const p of trail) ctx.lineTo(p.x, p.y);
-    ctx.strokeStyle = 'rgba(224,164,88,0.9)';
-    ctx.lineWidth = 5;
-    ctx.lineCap = 'round';
-    ctx.shadowColor = '#fff8e0';
-    ctx.shadowBlur = 8;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
+    SFX.init();        // ต้องเรียกตอนผู้เล่นกดปุ่ม
+    SFX.startMusic();  // เพลงประกอบ
+    Record.reset();
+
+    state = 'playing';
   }
 
-  // particles
-  for (const p of particles) {
-    ctx.globalAlpha = Math.max(p.life / 40, 0);
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    ctx.fill();
+  function endGame(byBomb) {
+    if (state !== 'playing') return;
+    state = 'ending';
+    endTimer = byBomb ? 0.9 : 0.35;
+    SFX.stopMusic();
   }
-  ctx.globalAlpha = 1;
 
-  // objects
-  for (const obj of objects) {
+  function finishGame() {
+    state = 'idle';
+    finalScoreEl.textContent = score;
+    gameoverScreen.classList.remove('hidden');
+    SFX.gameOver();
+  }
+
+  function missFruit() {
+    lives--;
+    updateHud();
+    if (lives <= 0) endGame(false);
+  }
+
+  startBtn.addEventListener('click', startGame);
+  restartBtn.addEventListener('click', startGame);
+
+  /* ---------- อัปเดตฟิสิกส์ ---------- */
+  function update(dt) {
+    if (state === 'playing') {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) spawnWave();
+    }
+
+    objs = objs.filter((o) => {
+      o.vy += G * dt;
+      o.x += o.vx * dt;
+      o.y += o.vy * dt;
+      o.rot += o.vr * dt;
+      if (o.y - o.r > H && o.vy > 0) {
+        if (!o.bomb && state === 'playing') missFruit();
+        return false;
+      }
+      return true;
+    });
+
+    pieces = pieces.filter((p) => {
+      p.age += dt;
+      p.vy += G * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.rot += p.vr * dt;
+      return p.y - p.r < H + p.r * 2 && p.age < 3;
+    });
+
+    parts = parts.filter((p) => {
+      p.age += dt;
+      p.vy += p.g * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      return p.age < p.life;
+    });
+
+    texts = texts.filter((t) => {
+      t.age += dt;
+      t.y -= 40 * dt;
+      return t.age < 0.9;
+    });
+
+    if (flash > 0) flash = Math.max(0, flash - dt * 2);
+
+    if (state === 'ending') {
+      endTimer -= dt;
+      if (endTimer <= 0) finishGame();
+    }
+  }
+
+  /* ---------- วาด ---------- */
+  function drawEmoji(em, x, y, r, rot) {
     ctx.save();
-    ctx.translate(obj.x, obj.y);
-    ctx.rotate(obj.rot);
-    if (obj.fading !== undefined) ctx.globalAlpha = Math.max(obj.fading, 0);
-    if (obj.half) ctx.translate(obj.half * obj.r * 0.15, 0);
-    ctx.font = `${obj.r * 2}px serif`;
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.font = Math.round(r * 1.9) + 'px ' + EMOJI_FONT;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(obj.type.emoji, 0, 0);
+    ctx.fillText(em, 0, 0);
     ctx.restore();
-    ctx.globalAlpha = 1;
   }
-}
 
-function loop(t) {
-  if (!running) return;
-  update();
-  draw();
-  requestAnimationFrame(loop);
-}
+  function drawPiece(p) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot + p.cutA);
+    ctx.beginPath();
+    ctx.rect(-p.r * 2, p.side < 0 ? -p.r * 2 : 0, p.r * 4, p.r * 2);
+    ctx.clip();
+    ctx.rotate(-p.cutA);
+    ctx.font = Math.round(p.r * 1.9) + 'px ' + EMOJI_FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(p.e, 0, 0);
+    ctx.restore();
+  }
 
-function startGame() {
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // ละอองน้ำผลไม้
+    for (const p of parts) {
+      ctx.globalAlpha = Math.max(0, 1 - p.age / p.life);
+      ctx.fillStyle = p.c;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, 6.283);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    for (const o of objs) drawEmoji(o.t.e, o.x, o.y, o.r, o.rot);
+    for (const p of pieces) drawPiece(p);
+
+    // รอยฟัน
+    const now = performance.now();
+    trail = trail.filter((p) => now - p.t < 180);
+    if (trail.length > 1) {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (let i = 1; i < trail.length; i++) {
+        const a = trail[i - 1], b = trail[i];
+        const k = 1 - (now - b.t) / 180;
+        ctx.strokeStyle = 'rgba(255,255,255,' + k.toFixed(2) + ')';
+        ctx.lineWidth = 2 + 8 * k;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+    }
+
+    // ข้อความคอมโบ
+    for (const t of texts) {
+      ctx.globalAlpha = Math.max(0, 1 - t.age / 0.9);
+      ctx.font = '800 ' + Math.round(R * 0.6) + 'px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#7c2d12';
+      ctx.strokeText(t.text, t.x, t.y);
+      ctx.fillStyle = '#ffe066';
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
+
+    // แฟลชตอนระเบิด
+    if (flash > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (flash * 0.8).toFixed(2) + ')';
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  /* ---------- ลูปหลัก ---------- */
+  function frame(t) {
+    if (!lastT) lastT = t;
+    const dt = Math.min(0.033, (t - lastT) / 1000);
+    lastT = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
   resize();
-  reset();
-  running = true;
-  startScreen.classList.add('hidden');
-  gameoverScreen.classList.add('hidden');
-  requestAnimationFrame(loop);
-}
-
-function endGame() {
-  running = false;
-  finalScoreEl.textContent = score;
-  setTimeout(() => gameoverScreen.classList.remove('hidden'), 400);
-}
-
-document.getElementById('start-btn').addEventListener('click', startGame);
-document.getElementById('restart-btn').addEventListener('click', startGame);
-
-resize();
+  updateHud();
+  requestAnimationFrame(frame);
+})();
